@@ -1,0 +1,315 @@
+/**
+ * Riskified Review demo — local server.
+ *
+ * Why this exists: the browser cannot call Riskified directly. Every request
+ * must carry an HMAC-SHA256 signature computed over the raw request body with
+ * the shop auth token, and api.riskified.com does not serve CORS headers to a
+ * page origin. So the page talks to this server, and this server talks to
+ * Riskified.
+ */
+
+const express = require('express');
+const crypto = require('crypto');
+const path = require('path');
+const { config, ACTIONS } = require('./config');
+
+const app = express();
+
+// The webhook needs the raw bytes to verify the signature, so it is mounted
+// before the JSON parser and reads a Buffer.
+app.post(
+  '/webhook/riskified',
+  express.raw({ type: '*/*', limit: '2mb' }),
+  handleWebhook
+);
+
+app.use(express.json({ limit: '2mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ---------------------------------------------------------------------------
+// In-memory state. Restarting the server clears the demo, which is what you
+// want between runs.
+// ---------------------------------------------------------------------------
+const orders = new Map(); // order id -> { id, status, events: [] }
+const sseClients = new Set();
+
+function broadcast(event) {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const res of sseClients) res.write(payload);
+}
+
+function record(orderId, event) {
+  const entry = { ...event, at: new Date().toISOString() };
+  if (orderId) {
+    if (!orders.has(orderId)) orders.set(orderId, { id: orderId, status: 'new', events: [] });
+    const order = orders.get(orderId);
+    order.events.push(entry);
+    if (entry.status) order.status = entry.status;
+    entry.orderId = orderId;
+  }
+  broadcast(entry);
+  return entry;
+}
+
+// ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+function sign(body) {
+  return crypto
+    .createHmac('sha256', config.authToken)
+    .update(body, 'utf8')
+    .digest('hex');
+}
+
+function buildHeaders(rawBody) {
+  return {
+    'Content-Type': 'application/json',
+    'api-version': config.apiVersion,
+    'X-RISKIFIED-SHOP-DOMAIN': config.shopDomain,
+    // HMAC is computed over the raw body only — headers are not part of it.
+    'X-RISKIFIED-HMAC-SHA256': sign(rawBody),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Outbound proxy: POST /call/:action
+// ---------------------------------------------------------------------------
+app.post('/call/:action', async (req, res) => {
+  const action = ACTIONS[req.params.action];
+  if (!action) {
+    return res.status(400).json({ error: `Unknown action "${req.params.action}"` });
+  }
+
+  const payload = req.body;
+  const orderId =
+    payload?.order?.id ?? payload?.checkout?.id ?? payload?.id ?? null;
+
+  const rawBody = JSON.stringify(payload);
+  const headers = buildHeaders(rawBody);
+  const base = action.sync ? config.syncBase : config.asyncBase;
+  const url = base + action.path;
+
+  const sent = {
+    type: 'request',
+    action: req.params.action,
+    label: action.label,
+    url,
+    // The token itself is never shown; the derived signature is, because
+    // seeing it is half the point of the demo.
+    headers: { ...headers },
+    body: payload,
+    simulated: config.simulate,
+  };
+  record(orderId, sent);
+
+  if (config.simulate) {
+    const simulated = simulateResponse(req.params.action, payload);
+    record(orderId, {
+      type: 'response',
+      action: req.params.action,
+      status: simulated.status,
+      httpStatus: 200,
+      body: simulated.body,
+      simulated: true,
+    });
+    if (simulated.deferredDecision) {
+      scheduleSimulatedDecision(orderId, simulated.deferredDecision);
+    }
+    return res.json({ ok: true, httpStatus: 200, body: simulated.body, simulated: true });
+  }
+
+  if (!config.authToken) {
+    const message =
+      'No RISKIFIED_AUTH_TOKEN set. Add it to .env, or run with SIMULATE=true.';
+    record(orderId, { type: 'error', action: req.params.action, message });
+    return res.status(500).json({ error: message });
+  }
+
+  try {
+    const upstream = await fetch(url, { method: 'POST', headers, body: rawBody });
+    const text = await upstream.text();
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = { raw: text };
+    }
+
+    record(orderId, {
+      type: 'response',
+      action: req.params.action,
+      httpStatus: upstream.status,
+      status: body?.order?.status || body?.status || null,
+      body,
+    });
+
+    res.status(200).json({ ok: upstream.ok, httpStatus: upstream.status, body });
+  } catch (err) {
+    record(orderId, { type: 'error', action: req.params.action, message: err.message });
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Inbound notification endpoint. This is the URL you register in the Riskified
+// portal (point a tunnel at it: ngrok http 3000 -> https://xxx.ngrok.app/webhook/riskified)
+// ---------------------------------------------------------------------------
+function handleWebhook(req, res) {
+  const raw = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body || '');
+  const received = req.get('X-RISKIFIED-HMAC-SHA256') || '';
+
+  let verified = null;
+  if (config.verifyWebhookHmac && config.authToken) {
+    const expected = sign(raw);
+    verified =
+      received.length === expected.length &&
+      crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+  }
+
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = { raw };
+  }
+
+  const orderId = body?.order?.id ?? body?.id ?? null;
+  const status = body?.order?.status ?? body?.status ?? null;
+
+  record(orderId, {
+    type: 'notification',
+    label: 'Decision received',
+    status,
+    hmacVerified: verified,
+    headers: {
+      'X-RISKIFIED-HMAC-SHA256': received,
+      'X-RISKIFIED-SHOP-DOMAIN': req.get('X-RISKIFIED-SHOP-DOMAIN') || null,
+    },
+    body,
+  });
+
+  // Riskified retries on non-2xx, so always acknowledge.
+  res.status(200).json({ received: true });
+}
+
+// ---------------------------------------------------------------------------
+// Simulator — lets the demo run with no network and no credentials.
+// ---------------------------------------------------------------------------
+function simulateResponse(actionName, payload) {
+  const order = payload?.order || {};
+  const firstName = String(order?.billing_address?.first_name || '').toLowerCase();
+
+  if (actionName === 'decide') {
+    // Same trigger the sandbox uses: "otp" in billing_address.first_name.
+    const wantsOtp = firstName.includes('otp');
+    const alreadyChallenged = Boolean(order?.challenge_access_token);
+
+    if (wantsOtp && !alreadyChallenged) {
+      return {
+        status: 'otp',
+        body: {
+          order: {
+            id: order.id,
+            status: 'otp',
+            description: 'Simulated OTP challenge',
+            // A real token opens the hosted widget. This one cannot, so the
+            // page shows a stand-in panel when `simulated` is set.
+            authentication: { challenge_token: 'SIMULATED-CHALLENGE-TOKEN' },
+          },
+        },
+      };
+    }
+
+    return {
+      status: 'approved',
+      body: {
+        order: {
+          id: order.id,
+          status: 'approved',
+          description: alreadyChallenged
+            ? 'Simulated decision after OTP challenge'
+            : 'Simulated decision',
+        },
+      },
+    };
+  }
+
+  return { status: null, body: { order: { id: order.id, status: 'ok' } } };
+}
+
+function scheduleSimulatedDecision(orderId, status) {
+  setTimeout(() => {
+    record(orderId, {
+      type: 'notification',
+      label: 'Decision received',
+      status,
+      hmacVerified: null,
+      simulated: true,
+      body: {
+        order: {
+          id: orderId,
+          status,
+          description: 'Simulated asynchronous decision',
+          decided_at: new Date().toISOString(),
+        },
+      },
+    });
+  }, 4000);
+}
+
+// Manual override — the button in the console that forces a decision on stage.
+app.post('/simulate/decision', (req, res) => {
+  const { orderId, status } = req.body || {};
+  if (!orderId || !status) return res.status(400).json({ error: 'orderId and status required' });
+  record(orderId, {
+    type: 'notification',
+    label: 'Decision received',
+    status,
+    simulated: true,
+    body: { order: { id: orderId, status, description: 'Injected from demo console' } },
+  });
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Live stream to the page
+// ---------------------------------------------------------------------------
+app.get('/events', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.flushHeaders();
+  res.write(': connected\n\n');
+  sseClients.add(res);
+  req.on('close', () => sseClients.delete(res));
+});
+
+app.get('/config', (req, res) => {
+  res.json({
+    shopDomain: config.shopDomain,
+    asyncBase: config.asyncBase,
+    syncBase: config.syncBase,
+    simulate: config.simulate,
+    hasToken: Boolean(config.authToken),
+    otpSdkUrl: config.otpSdkUrl,
+    actions: Object.fromEntries(
+      Object.entries(ACTIONS).map(([k, v]) => [k, { label: v.label, path: v.path, sync: v.sync }])
+    ),
+  });
+});
+
+app.listen(config.port, () => {
+  console.log(`\n  Riskified Review demo`);
+  console.log(`  ---------------------`);
+  console.log(`  Storefront   http://localhost:${config.port}`);
+  console.log(`  Webhook      POST /webhook/riskified`);
+  console.log(`  Shop domain  ${config.shopDomain}`);
+  console.log(`  Mode         ${config.simulate ? 'simulator (no calls leave this machine)' : 'live'}`);
+  if (!config.simulate && !config.authToken) {
+    console.log(`  Warning      no auth token set — calls will fail\n`);
+  } else {
+    console.log('');
+  }
+});

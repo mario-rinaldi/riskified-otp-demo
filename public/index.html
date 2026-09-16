@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Riskified OTP demo</title>
+<link rel="icon" href="/assets/r-symbol.svg">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- =============================================== merchant storefront -->
+  <section class="store">
+    <div class="store-brand">Halden &amp; Co.</div>
+
+    <h1>Add funds</h1>
+    <p class="lede">A stand-in merchant checkout. Funding this account fires a
+      synchronous pre-auth decision before any money moves.</p>
+
+    <div class="product">
+      <div class="product-art"></div>
+      <div>
+        <div class="product-name">Kalshi ACH Fund</div>
+        <div class="product-meta">Deposit &middot; digital</div>
+      </div>
+      <div class="product-price" id="displayAmount">$500.00</div>
+    </div>
+
+    <fieldset>
+      <legend>Payment method</legend>
+      <div class="segmented" id="methodToggle">
+        <button type="button" class="seg active" data-method="ach">Bank transfer (ACH)</button>
+        <button type="button" class="seg" data-method="card">Credit card</button>
+      </div>
+      <p class="hint" id="methodHint">Plaid ACH. Account and routing numbers are fixed in the payload.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Your details</legend>
+      <div class="field">
+        <label for="amount">Amount (USD)</label>
+        <input id="amount" value="500">
+      </div>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" value="demo@gmail.com">
+      </div>
+      <div class="field">
+        <label for="phone">Mobile number</label>
+        <input id="phone" value="+5511953188864">
+      </div>
+      <p class="hint">This number is written to every phone field in the payload,
+        so whichever one the OTP service reads, it gets the same value.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Demo controls</legend>
+      <label class="check">
+        <input type="checkbox" id="triggerOtp">
+        <span>Trigger an OTP challenge</span>
+      </label>
+      <p class="hint">Prefixes <code>otp</code> onto the first name in the payload,
+        which is what the sandbox keys off.</p>
+    </fieldset>
+
+    <div class="btn-row">
+      <button class="btn" id="placeOrder">Add funds</button>
+      <button class="btn btn-secondary" id="resetDemo">Reset</button>
+    </div>
+  </section>
+
+  <!-- ==================================================== demo console -->
+  <section class="console">
+
+    <div class="console-head">
+      <img src="/assets/riskified-logo-white.svg" alt="Riskified">
+      <p class="sub">Pre-auth sync decision with OTP recovery. Every request, header and decision as it happens.</p>
+      <div class="env" id="env"></div>
+    </div>
+
+    <div>
+      <h2>Order state</h2>
+      <div class="timeline" id="timeline"></div>
+      <div class="verdict" id="verdict"></div>
+    </div>
+
+    <div>
+      <h2>Payload</h2>
+      <div class="toggle">
+        <input type="checkbox" id="useCustom">
+        <label for="useCustom" style="margin:0">Send the edited payload below instead of the generated one</label>
+      </div>
+      <textarea id="payload" spellcheck="false"></textarea>
+    </div>
+
+    <div>
+      <h2>Call log</h2>
+      <div class="log" id="log">
+        <p class="empty">Nothing yet. Add funds to start.</p>
+      </div>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn btn-secondary" id="clearLog">Clear log</button>
+      </div>
+    </div>
+
+  </section>
+</div>
+
+<!-- ============================================================ OTP modal -->
+<div class="modal" id="otpModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">Verify it's you</div>
+        <div class="modal-sub" id="otpSub">We've sent a code to your mobile number.</div>
+      </div>
+      <button class="modal-close" id="otpClose" aria-label="Close">&times;</button>
+    </div>
+
+    <!-- The SDK injects its iframe into this element by id. It must exist
+         before renderOTPWidget runs, and it needs a real height because the
+         injected iframe is sized at 100%. -->
+    <div id="otp-widget"></div>
+
+    <div id="otpSimulated" class="otp-simulated">
+      <p>Simulator mode — the hosted widget needs a live challenge token, so this
+        stands in for it.</p>
+      <div class="btn-row">
+        <button class="btn" id="otpSimPass">Complete challenge</button>
+        <button class="btn btn-secondary" id="otpSimTimeout">Let it time out</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
