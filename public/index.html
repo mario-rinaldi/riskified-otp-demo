@@ -13,7 +13,7 @@
 
   <!-- =============================================== merchant storefront -->
   <section class="store">
-    <div class="store-brand">Halden &amp; Co.</div>
+    <div class="store-brand">Example &amp; Sons</div>
 
     <h1>Add funds</h1>
     <p class="lede">A stand-in merchant checkout. Funding this account fires a
@@ -22,7 +22,7 @@
     <div class="product">
       <div class="product-art"></div>
       <div>
-        <div class="product-name">Kalshi ACH Fund</div>
+        <div class="product-name" id="productName">Prediction Market ACH Fund</div>
         <div class="product-meta">Deposit &middot; digital</div>
       </div>
       <div class="product-price" id="displayAmount">$500.00</div>
@@ -48,11 +48,20 @@
         <input id="email" value="demo@gmail.com">
       </div>
       <div class="field">
-        <label for="phone">Mobile number</label>
-        <input id="phone" value="+5511953188864">
+        <label for="phoneNational">Mobile number</label>
+        <div class="phone-row">
+          <div class="combo" id="dialCombo">
+            <input id="dialInput" class="combo-input" role="combobox" aria-expanded="false"
+                   aria-controls="dialList" aria-autocomplete="list" autocomplete="off"
+                   placeholder="Country">
+            <ul class="combo-list" id="dialList" role="listbox" hidden></ul>
+          </div>
+          <input id="phoneNational" inputmode="tel" autocomplete="off" placeholder="Number">
+        </div>
       </div>
-      <p class="hint">This number is written to every phone field in the payload,
-        so whichever one the OTP service reads, it gets the same value.</p>
+      <p class="hint">Search the country list by name or by dialling code. The full
+        number is written to every phone field in the payload, so whichever one the
+        OTP service reads, it gets the same value.</p>
     </fieldset>
 
     <fieldset>
@@ -61,8 +70,11 @@
         <input type="checkbox" id="triggerOtp">
         <span>Trigger an OTP challenge</span>
       </label>
-      <p class="hint">Prefixes <code>otp</code> onto the first name in the payload,
-        which is what the sandbox keys off.</p>
+      <p class="hint">Sets the billing first name to <code id="otpTriggerFirst"></code>
+        and the last name to <code id="otpTriggerLast"></code>. Two sandbox services have to agree:
+        the decision rules decline on the last name, and the eligibility service
+        recommends OTP on the <code>otp</code> in the first name. Without both, the
+        order is approved and there is nothing to recover.</p>
     </fieldset>
 
     <div class="btn-row">

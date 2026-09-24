@@ -129,6 +129,47 @@ input:focus, select:focus, textarea:focus {
 
 .hint { font-size: 12px; color: #7b7f96; margin-top: 6px; }
 
+/* ------------------------------------------------ country dialling code -- */
+
+.phone-row { display: flex; gap: 10px; }
+.phone-row .combo { flex: 0 0 200px; }
+.phone-row #phoneNational { flex: 1; }
+
+.combo { position: relative; }
+
+.combo-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(8, 14, 63, 0.14);
+}
+
+.combo-list li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.combo-list li .dial { margin-left: auto; color: #7b7f96; font-size: 13px; }
+.combo-list li.active { background: #f3f2ff; color: var(--blue); }
+.combo-list li.active .dial { color: var(--blue); }
+.combo-empty { padding: 8px 10px; color: #7b7f96; font-size: 13px; }
+
+
 .btn {
   font-family: inherit;
   font-size: 15px;
@@ -261,6 +302,10 @@ input:focus, select:focus, textarea:focus {
   background: rgba(255, 255, 255, 0.06);
   border-radius: 8px;
   overflow: hidden;
+  /* .log is a flex column, and flex items shrink by default. Without this an
+     expanded entry gets squeezed to fit instead of overflowing, so the tail of
+     a long response is clipped and there is nothing to scroll to. */
+  flex-shrink: 0;
 }
 
 .entry-head {
@@ -299,7 +344,13 @@ input:focus, select:focus, textarea:focus {
   display: none;
 }
 
-.entry.open pre { display: block; }
+/* Scrolls on its own, like the payload box, so one long response doesn't push
+   every other entry out of reach. */
+.entry.open pre {
+  display: block;
+  max-height: 340px;
+  overflow-y: auto;
+}
 
 .empty { color: #6c729a; font-size: 13px; }
 

@@ -61,14 +61,18 @@ function sign(body) {
     .digest('hex');
 }
 
-function buildHeaders(rawBody) {
-  return {
+function buildHeaders(rawBody, action = {}) {
+  const headers = {
     'Content-Type': 'application/json',
-    'api-version': config.apiVersion,
     'X-RISKIFIED-SHOP-DOMAIN': config.shopDomain,
     // HMAC is computed over the raw body only — headers are not part of it.
     'X-RISKIFIED-HMAC-SHA256': sign(rawBody),
   };
+  // The OTP host versions itself through Accept; everything else uses
+  // `api-version`. Sending both to the OTP host is not worth the risk.
+  if (action.accept) headers.Accept = action.accept;
+  else headers['api-version'] = config.apiVersion;
+  return headers;
 }
 
 // ---------------------------------------------------------------------------
@@ -85,8 +89,13 @@ app.post('/call/:action', async (req, res) => {
     payload?.order?.id ?? payload?.checkout?.id ?? payload?.id ?? null;
 
   const rawBody = JSON.stringify(payload);
-  const headers = buildHeaders(rawBody);
-  const base = action.sync ? config.syncBase : config.asyncBase;
+  const headers = buildHeaders(rawBody, action);
+  const base =
+    action.host === 'otp'
+      ? config.otpBase
+      : action.sync
+        ? config.syncBase
+        : config.asyncBase;
   const url = base + action.path;
 
   const sent = {
@@ -198,23 +207,67 @@ function handleWebhook(req, res) {
 function simulateResponse(actionName, payload) {
   const order = payload?.order || {};
   const firstName = String(order?.billing_address?.first_name || '').toLowerCase();
+  const lastName = String(order?.billing_address?.last_name || '').toLowerCase();
+  const email = String(order?.email || '').toLowerCase();
+
+  // The sandbox splits this across two services, and so does the simulator —
+  // otherwise it would approve orders the real thing declines, or worse,
+  // decline ones it approves.
+  //   decision rules: decline on 'decline' | 'considerable' | 'highrisk'
+  //   eligibility:    recommend OTP on 'otp' in the email or first name
+  const declineKeywords = ['decline', 'considerable', 'highrisk'];
+  const declined = declineKeywords.some(
+    (k) => firstName.includes(k) || lastName.includes(k) || email.includes(k)
+  );
+  const eligible = firstName.includes('otp') || email.includes('otp');
+
+  // /otp/initiate returns the widget JWT and nothing else. A simulated one
+  // can't open the hosted widget, so the page shows a stand-in panel instead.
+  if (actionName === 'otp_initiate') {
+    return {
+      status: null,
+      // snake_case, matching the live API rather than its OpenAPI example.
+      body: { widget_token: 'SIMULATED-WIDGET-TOKEN' },
+    };
+  }
 
   if (actionName === 'decide') {
-    // Same trigger the sandbox uses: "otp" in billing_address.first_name.
-    const wantsOtp = firstName.includes('otp');
     const alreadyChallenged = Boolean(order?.challenge_access_token);
 
-    if (wantsOtp && !alreadyChallenged) {
+    // Only a declined order can be recovered. 'otp' on its own is approved
+    // with a recommendation attached, which is a dead end — reproduce that
+    // here so the trap is visible in the simulator too.
+    if (declined && eligible && !alreadyChallenged) {
+      // Mirrors the real sandbox: the order is declined, and the OTP offer
+      // rides along in advice.recommendations. There is no token here.
       return {
-        status: 'otp',
+        status: 'declined',
         body: {
           order: {
             id: order.id,
-            status: 'otp',
-            description: 'Simulated OTP challenge',
-            // A real token opens the hosted widget. This one cannot, so the
-            // page shows a stand-in panel when `simulated` is set.
-            authentication: { challenge_token: 'SIMULATED-CHALLENGE-TOKEN' },
+            status: 'declined',
+            description: 'Order exhibits strong fraudulent indicators',
+            old_status: 'created',
+            category: 'Fraudulent',
+            advice: {
+              recommendations: [{ type: 'otp', recommended: true }],
+            },
+          },
+        },
+      };
+    }
+
+    // Declined with no OTP word: a plain decline, nothing to recover.
+    if (declined && !alreadyChallenged) {
+      return {
+        status: 'declined',
+        body: {
+          order: {
+            id: order.id,
+            status: 'declined',
+            description: 'Order exhibits strong fraudulent indicators',
+            old_status: 'created',
+            category: 'Fraudulent',
           },
         },
       };
@@ -226,6 +279,11 @@ function simulateResponse(actionName, payload) {
         order: {
           id: order.id,
           status: 'approved',
+          // 'otp' without a decline keyword: the recommendation rides along on
+          // an approved order, so the widget never opens. This is the trap.
+          ...(eligible && !alreadyChallenged
+            ? { advice: { recommendations: [{ type: 'otp', recommended: true }] } }
+            : {}),
           description: alreadyChallenged
             ? 'Simulated decision after OTP challenge'
             : 'Simulated decision',
@@ -294,6 +352,10 @@ app.get('/config', (req, res) => {
     simulate: config.simulate,
     hasToken: Boolean(config.authToken),
     otpSdkUrl: config.otpSdkUrl,
+    beaconUrl: config.beaconUrl,
+    // The page assembles the /otp/initiate body so it shows up in the console
+    // panel like every other request; these are the parts it can't invent.
+    otp: config.otp,
     actions: Object.fromEntries(
       Object.entries(ACTIONS).map(([k, v]) => [k, { label: v.label, path: v.path, sync: v.sync }])
     ),
